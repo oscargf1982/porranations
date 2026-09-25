@@ -360,6 +360,8 @@ const S = {
   preds:[],     // todos los pronósticos
   players:{},   // uid -> {name}
   drafts:{},    // matchId -> {h:"",a:""}
+  openDetails:new Set(),
+  loaded:{matches:false, preds:false, users:false},
   unsub:[]
 };
 
@@ -503,13 +505,13 @@ function listenAll(){
   };
   S.unsub.push(db.collection("matches").onSnapshot(qs => {
     S.matches = {}; qs.forEach(d => S.matches[d.id] = d.data());
-    S.matchesReady = qs.size > 0; render();
+    S.matchesReady = qs.size > 0; S.loaded.matches = true; render();
   }, onErr));
   S.unsub.push(db.collection("preds").onSnapshot(qs => {
-    S.preds = []; qs.forEach(d => S.preds.push(d.data())); render();
+    S.preds = []; qs.forEach(d => S.preds.push(d.data())); S.loaded.preds = true; render();
   }, onErr));
   S.unsub.push(db.collection("users").onSnapshot(qs => {
-    S.players = {}; qs.forEach(d => S.players[d.id] = d.data()); render();
+    S.players = {}; qs.forEach(d => S.players[d.id] = d.data()); S.loaded.users = true; render();
   }, onErr));
 }
 function stopListeners(){ clearTimeout(S.retry); S.unsub.forEach(u => u()); S.unsub = []; }
@@ -523,12 +525,11 @@ function resultsMap(){
   const out = {}; MATCHES.forEach(m => { const r = resultOf(m.id); if (r) out[m.id] = r; }); return out;
 }
 function myPred(id){ return S.preds.find(p => p.uid === S.user.uid && p.matchId === id) || null; }
+/* Lo que se ve en las casillas: la edición en curso o, si no hay, lo guardado */
 function draftOf(id){
-  if (!S.drafts[id]){
-    const p = myPred(id);
-    S.drafts[id] = {h: p ? String(p.h) : "", a: p ? String(p.a) : ""};
-  }
-  return S.drafts[id];
+  if (S.drafts[id]) return S.drafts[id];
+  const p = myPred(id);
+  return {h: p ? String(p.h) : "", a: p ? String(p.a) : ""};
 }
 function isDirty(id){
   const d = S.drafts[id]; if (!d) return false;
@@ -541,6 +542,11 @@ function dirtyIds(){ return MATCHES.filter(m => !isClosed(m) && isDirty(m.id)).m
 /* ---------- render ---------- */
 function render(){
   if (!S.user) return;
+  // No pintar nada hasta tener partidos, pronósticos y jugadores cargados
+  if (!(S.loaded.matches && S.loaded.preds && S.loaded.users)){
+    $app.innerHTML = `<div class="spinner" aria-label="Cargando"></div>`;
+    return;
+  }
   const focusId = document.activeElement && document.activeElement.id;
   document.querySelectorAll("#tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === S.tab));
   if (S.tab === "picks") renderPicks();
@@ -556,6 +562,23 @@ function teamHTML(code, side){
   const stripe = `<span class="stripe" style="background:linear-gradient(${t.c[0]} 50%, ${t.c[1]} 50%);box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)"></span>`;
   const txt = `<span style="min-width:0"><span class="code">${code}</span><span class="name">${esc(t.n)}</span></span>`;
   return `<div class="team ${side}">${side==="home" ? stripe+txt : txt+stripe}</div>`;
+}
+
+/* Pronósticos de todos los jugadores para un partido (visibles siempre) */
+function othersHTML(m, res, closed){
+  const list = S.preds.filter(p => p.matchId === m.id);
+  const total = Object.keys(S.players).length;
+  if (!list.length) return `<details class="others" data-id="${m.id}"${S.openDetails.has(m.id)?" open":""}><summary>Pronósticos de los demás (0 de ${total})</summary><p style="margin:8px 0 0;color:var(--muted)">Nadie ha pronosticado todavía este partido.</p></details>`;
+  const items = list.map(p => {
+    const sc = scorePick(p, res);
+    const nm = (S.players[p.uid] && S.players[p.uid].name) || "Participante";
+    return {nm, me:p.uid===S.user.uid, txt:`${p.h}–${p.a}`, pts: sc ? sc.pts : null};
+  }).sort((x,y) => (y.pts??-1)-(x.pts??-1) || x.nm.localeCompare(y.nm,"es"));
+  return `<details class="others" data-id="${m.id}"${S.openDetails.has(m.id)?" open":""}>
+    <summary>Pronósticos de todos (${list.length} de ${total})</summary>
+    ${closed ? "" : `<p style="margin:8px 0 0;color:var(--muted)">Pueden cambiar hasta las ${fmtTime(m.kick)}.</p>`}
+    <ul>${items.map(i => `<li><span>${i.me?"<b>":""}${esc(i.nm)}${i.me?"</b>":""}</span><span><b>${i.txt}</b>${i.pts!==null?` · ${i.pts}`:""}</span></li>`).join("")}</ul>
+  </details>`;
 }
 
 function renderPicks(){
@@ -594,18 +617,8 @@ function renderPicks(){
         const s = scorePick(mine, res);
         const ptsBadge = s ? `<span class="pts p${s.pts}">${s.pts} ${s.pts===1?"punto":"puntos"}</span>` : "";
         foot = `<div class="mfoot"><span>Tu pronóstico: <b>${mine ? `${mine.h}–${mine.a}` : "ninguno"}</b></span>${ptsBadge}</div>`;
-        const others = S.preds.filter(p => p.matchId === m.id);
-        if (others.length){
-          const items = others.map(p => {
-            const sc = scorePick(p, res);
-            const nm = (S.players[p.uid] && S.players[p.uid].name) || "Participante";
-            return {nm, txt:`${p.h}–${p.a}`, pts: sc ? sc.pts : null};
-          }).sort((x,y) => (y.pts??-1)-(x.pts??-1) || x.nm.localeCompare(y.nm,"es"));
-          foot += `<details class="others"><summary>Ver pronósticos (${others.length})</summary><ul>${
-            items.map(i => `<li><span>${esc(i.nm)}</span><span><b>${i.txt}</b>${i.pts!==null?` · ${i.pts}`:""}</span></li>`).join("")
-          }</ul></details>`;
-        }
       }
+      foot += othersHTML(m, closed ? res : null, closed);
       html += `<article class="match ${closed?"closed":""}">
         <div class="mhead"><span><span class="grp">${m.g}</span>${fmtTime(m.kick)}</span>${state}</div>
         <div class="board">${teamHTML(m.h,"home")}${center}${teamHTML(m.a,"away")}</div>
@@ -614,11 +627,15 @@ function renderPicks(){
     });
   });
   $app.innerHTML = html;
+  $app.querySelectorAll("details.others").forEach(d => d.addEventListener("toggle", () => {
+    d.open ? S.openDetails.add(d.dataset.id) : S.openDetails.delete(d.dataset.id);
+  }));
   $app.querySelectorAll(".score input").forEach(inp => {
     inp.addEventListener("input", () => {
       const v = inp.value.replace(/\D/g,"").slice(0,2);
       inp.value = v;
-      draftOf(inp.dataset.id)[inp.dataset.s] = v;
+      if (!S.drafts[inp.dataset.id]) S.drafts[inp.dataset.id] = {...draftOf(inp.dataset.id)};
+      S.drafts[inp.dataset.id][inp.dataset.s] = v;
       const dirty = isDirty(inp.dataset.id);
       document.getElementById("h_"+inp.dataset.id).classList.toggle("dirty", dirty);
       document.getElementById("a_"+inp.dataset.id).classList.toggle("dirty", dirty);
@@ -654,6 +671,7 @@ async function saveAll(){
     });
   }));
   btn.disabled = false; btn.textContent = "Guardar pronósticos";
+  results.forEach((r,i) => { if (r.status === "fulfilled") delete S.drafts[ids[i]]; });
   const failed = results.map((r,i) => r.status==="rejected" ? ids[i] : null).filter(Boolean);
   if (failed.length){
     const names = failed.map(id => { const m = MATCH_BY_ID[id]; return `${TEAMS[m.h].n}–${TEAMS[m.a].n}`; }).join(", ");
@@ -693,7 +711,7 @@ function renderRules(){
       <dt>0</dt><dd>Fallas el signo o no has hecho pronóstico.</dd>
     </dl>
     <p>El marcador exacto ya incluye el signo: vale ${PTS_EXACT} puntos, no ${PTS_EXACT+PTS_SIGN}.</p>
-    <p>Puedes cambiar tu pronóstico cuantas veces quieras hasta la hora de inicio del partido. A partir de ese momento queda cerrado y se muestran los pronósticos de todos.</p>
+    <p>Puedes cambiar tu pronóstico cuantas veces quieras hasta la hora de inicio del partido. A partir de ese momento queda cerrado. Los pronósticos de todos se pueden ver en cualquier momento, también antes de que empiece el partido.</p>
     <p>Entran los ${MATCHES.length} partidos de la Liga A que se juegan del 24 de septiembre al 6 de octubre. Los que ya se habían jugado al abrir la porra cuentan como cerrados para todos.</p>
     <p style="margin-bottom:0">En caso de empate a puntos gana quien tenga más marcadores exactos; si sigue el empate, quien tenga más signos acertados.</p>
   </div>`;
@@ -797,6 +815,7 @@ else {
     stopListeners();
     if (user && !user.emailVerified){ try{ await user.reload(); user = auth.currentUser; }catch(e){} }
     S.user = null; S.drafts = {}; S.preds = []; S.matches = {}; S.players = {};
+    S.loaded = {matches:false, preds:false, users:false};
     document.getElementById("savebar").classList.remove("show");
     if (!user) return showAuth("login");
     if (!user.emailVerified) return showVerify(user);
