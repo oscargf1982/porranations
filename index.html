@@ -56,10 +56,10 @@ header.top::before{
   line-height:.9;margin:0;letter-spacing:.5px;
 }
 .brand h1 span{display:block;font-weight:600;font-size:.45em;letter-spacing:.5px;color:#CFE3D8;margin-top:6px}
-.brand h1 .kicker{display:inline-block;font-weight:700;font-size:.42em;letter-spacing:1px;color:var(--ink);background:var(--flood);border-radius:4px;padding:2px 8px 1px;margin-bottom:8px}
+.brand h1 .kicker{display:table;font-weight:700;font-size:.42em;letter-spacing:1px;color:var(--ink);background:var(--flood);border-radius:4px;padding:2px 8px 1px;margin-bottom:8px}
 .brand h1 .dates{font-family:var(--body);font-weight:500;font-size:14px;letter-spacing:0;color:#9FC2B0;margin-top:4px}
-.who{text-align:right;font-size:14px;color:#CFE3D8;min-width:0}
-.who strong{display:block;color:#fff;font-weight:600;max-width:40vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.who{text-align:right;font-size:14px;color:#CFE3D8;flex:none;padding-top:4px}
+.who strong{display:block;color:#fff;font-weight:600;max-width:32vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .linkbtn{background:none;border:0;padding:0;color:var(--flood);cursor:pointer;text-decoration:underline;font-size:14px}
 nav.tabs{display:flex;gap:4px;margin-top:18px;overflow-x:auto;scrollbar-width:none}
 nav.tabs button{
@@ -477,6 +477,9 @@ async function startApp(user){
   document.getElementById("whoName").textContent = user.displayName || user.email;
   $app.innerHTML = `<div class="spinner" aria-label="Cargando"></div>`;
 
+  // Renueva el token para que las reglas vean el email como confirmado
+  try{ await user.getIdToken(true); }catch(e){ console.error(e); }
+
   // Alta en la lista de participantes
   try{
     const ref = db.collection("users").doc(user.uid);
@@ -484,19 +487,32 @@ async function startApp(user){
     if (!snap.exists) await ref.set({name:(user.displayName || user.email.split("@")[0]).slice(0,30), createdAt: firebase.firestore.FieldValue.serverTimestamp()});
   }catch(e){ console.error(e); }
 
+  listenAll();
+}
+function listenAll(){
   stopListeners();
+  const onErr = err => {
+    console.error(err);
+    toast("Se ha perdido la conexión con la porra. Reintentando…");
+    clearTimeout(S.retry);
+    S.retry = setTimeout(async () => {
+      if (!S.user) return;
+      try{ await S.user.getIdToken(true); }catch(e){}
+      listenAll();
+    }, 5000);
+  };
   S.unsub.push(db.collection("matches").onSnapshot(qs => {
     S.matches = {}; qs.forEach(d => S.matches[d.id] = d.data());
     S.matchesReady = qs.size > 0; render();
-  }, err => console.error(err)));
+  }, onErr));
   S.unsub.push(db.collection("preds").onSnapshot(qs => {
     S.preds = []; qs.forEach(d => S.preds.push(d.data())); render();
-  }, err => console.error(err)));
+  }, onErr));
   S.unsub.push(db.collection("users").onSnapshot(qs => {
     S.players = {}; qs.forEach(d => S.players[d.id] = d.data()); render();
-  }, err => console.error(err)));
+  }, onErr));
 }
-function stopListeners(){ S.unsub.forEach(u => u()); S.unsub = []; }
+function stopListeners(){ clearTimeout(S.retry); S.unsub.forEach(u => u()); S.unsub = []; }
 
 /* ---------- utilidades de datos ---------- */
 function resultOf(id){
@@ -740,7 +756,8 @@ async function seedMatches(){
       } else batch.set(ref, base, {merge:true});   // no toca resultados ya introducidos
     });
     await batch.commit();
-    out.innerHTML = `<p class="msg ok">Partidos preparados (${MATCHES.length}).</p>`;
+    toast(`Partidos preparados (${MATCHES.length}).`, true);
+    listenAll();
   }catch(e){ out.innerHTML = `<p class="msg err">${esc(authError(e))}</p>`; }
 }
 
@@ -776,8 +793,9 @@ else {
   firebase.initializeApp(firebaseConfig);
   auth = firebase.auth(); db = firebase.firestore();
   auth.languageCode = "es";
-  auth.onAuthStateChanged(user => {
+  auth.onAuthStateChanged(async user => {
     stopListeners();
+    if (user && !user.emailVerified){ try{ await user.reload(); user = auth.currentUser; }catch(e){} }
     S.user = null; S.drafts = {}; S.preds = []; S.matches = {}; S.players = {};
     document.getElementById("savebar").classList.remove("show");
     if (!user) return showAuth("login");
